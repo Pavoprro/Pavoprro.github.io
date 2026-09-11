@@ -52,11 +52,6 @@
     "uniform float uSeed;",
 
     "float h21(vec2 p){ p=fract(p*vec2(123.34,345.45)); p+=dot(p,p+34.345); return fract(p.x*p.y); }",
-    "float noise(vec2 p){ vec2 i=floor(p),f=fract(p); f=f*f*(3.0-2.0*f);",
-    "  float a=h21(i),b=h21(i+vec2(1.0,0.0)),c=h21(i+vec2(0.0,1.0)),d=h21(i+vec2(1.0,1.0));",
-    "  return mix(mix(a,b,f.x),mix(c,d,f.x),f.y); }",
-    "float fbm(vec2 p){ float v=0.0,a=0.55; mat2 m=mat2(1.6,1.2,-1.2,1.6);",
-    "  for(int i=0;i<5;i++){ v+=a*noise(p); p=m*p; a*=0.5; } return v; }",
 
     "void main(){",
     "  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;",
@@ -65,58 +60,52 @@
     "  float ang = atan(p.y, p.x);",
     "  float Rh = max(uRadius, 0.0008);",
     "  float ny = p.y/(r+1e-4);",              // componente vertical normalizada
+    "  float aspect = uRes.x/uRes.y;",
     "  vec3 col = vec3(0.0);",
 
-    // campo de estrellas tenue, lejos del anillo
-    "  float st = pow(h21(floor((uv+uSeed)*vec2(uRes.x/uRes.y,1.0)*380.0)), 60.0);",
-    "  col += st * 0.45 * smoothstep(Rh*2.2, Rh*4.2, r);",
+    // ---- fondo NEGRO con estrellas dispersas que titilan ----
+    "  vec2 gs = uv*vec2(aspect,1.0)*9.0;",
+    "  vec2 cell = floor(gs); vec2 fr = fract(gs);",
+    "  float rnd = h21(cell + uSeed*1.7);",
+    "  float has = step(0.90, rnd);",                 // ~10% de las celdas tienen estrella
+    "  vec2 sp = vec2(h21(cell+1.3), h21(cell+2.7));",
+    "  float d = length(fr - sp);",
+    "  float tw = 0.5 + 0.5*sin(uTime*(0.8 + 2.4*h21(cell+4.1)) + rnd*28.0);", // titileo
+    "  float star = has * smoothstep(0.05, 0.0, d) * (0.2 + 0.8*tw) * (0.45 + 0.9*h21(cell+5.5));",
+    "  star *= smoothstep(Rh*1.9, Rh*4.3, r);",       // no encima del agujero
+    "  col += vec3(star) * 0.95;",
 
-    // arrastre de marco: wisps lenseados girando cerca del horizonte
-    "  float drag = 0.72/(r+0.06);",
-    "  float a2 = ang + drag + uTime*0.04;",
-    "  float wisp = fbm(vec2(a2*1.4, r*5.0 - uTime*0.05));",
-    "  wisp *= (1.0 - smoothstep(Rh*1.02, Rh*3.4, r));",
-    "  col += vec3(wisp) * 0.34 * uBright;",
-
-    // disco de acreción fino y kepleriano, inclinado (elipse)
-    "  float sq = mix(0.14, 0.72, uTilt);",
+    // ---- disco de acreción: ANILLOS definidos (sin niebla), elipse por inclinación ----
+    "  float sq = mix(0.12, 0.74, uTilt);",
     "  vec2 e = vec2(p.x, p.y/sq);",
     "  float er = length(e);",
-    "  float Rin = Rh*1.25, Rout = Rh*3.35;",
-    "  float disk = smoothstep(Rin, Rin+Rh*0.5, er) * (1.0 - smoothstep(Rout-Rh, Rout, er));",
-    "  float dtex = 0.55 + 0.75*fbm(vec2(ang*3.0 + uTime*0.25, er*7.0));",
-    "  disk *= dtex;",
-    // doppler: un lado (izquierdo) mucho más brillante
-    "  float dopp = 0.30 + 0.95*(0.5 - 0.5*cos(ang));",
+    "  float ring1 = exp(-pow((er - Rh*1.55)/(Rh*0.13), 2.0));",          // anillo primario
+    "  float ring2 = exp(-pow((er - Rh*2.15)/(Rh*0.11), 2.0)) * 0.55;",   // segundo anillo
+    "  float ring3 = exp(-pow((er - Rh*2.75)/(Rh*0.09), 2.0)) * 0.26;",   // tercero tenue
+    "  float disk = ring1 + ring2 + ring3;",
+    "  disk *= 0.9 + 0.1*sin(ang*3.0 + uTime*0.4);",                      // brillo rotacional fino
+    // doppler: un lado mucho más brillante
+    "  float dopp = 0.28 + 0.95*(0.5 - 0.5*cos(ang));",
     "  disk *= dopp;",
     // la mitad cercana (abajo) cruza POR DELANTE de la sombra; la lejana detrás se oculta
     "  float front = step(0.0, -p.y);",
-    "  float behindHidden = 1.0 - (step(0.0, p.y) * (1.0 - smoothstep(Rh, Rh*1.03, r)));",
-    "  disk *= mix(behindHidden, 1.0, front);",
-    "  col += vec3(disk) * 1.10 * uBright;",
+    "  float behind = 1.0 - (step(0.0, p.y) * (1.0 - smoothstep(Rh, Rh*1.03, r)));",
+    "  disk *= mix(behind, 1.0, front);",
+    "  col += vec3(disk) * 1.25 * uBright;",
 
-    // arco lenseado del lado lejano (anillo de Einstein primario, arriba)
-    "  float arc = exp(-pow((r - Rh*1.12)/(Rh*0.10), 2.0));",
-    "  arc *= smoothstep(-0.4, 0.7, ny);",
-    "  arc *= 0.7 + 0.6*fbm(vec2(ang*4.0 - uTime*0.2, 3.0));",
-    "  col += vec3(arc) * 0.85 * uBright;",
-    // secundario tenue abajo
-    "  float arc2 = exp(-pow((r - Rh*1.30)/(Rh*0.06), 2.0)) * (1.0 - smoothstep(-0.6, 0.2, ny));",
-    "  col += vec3(arc2) * 0.22 * uBright;",
+    // ---- arco lenseado del lado lejano, fino y arriba ----
+    "  float arc = exp(-pow((r - Rh*1.16)/(Rh*0.075), 2.0)) * smoothstep(-0.15, 0.85, ny);",
+    "  col += vec3(arc) * 0.6 * uBright;",
 
-    // anillo de fotones fino y brillante
-    "  float ring = exp(-pow((r - Rh*1.03)/(Rh*0.05), 2.0));",
-    "  col += vec3(ring) * (1.45*uBright);",
+    // ---- anillo de fotones fino y brillante ----
+    "  float pr = exp(-pow((r - Rh*1.04)/(Rh*0.03), 2.0));",
+    "  col += vec3(pr) * 1.7 * uBright;",
 
-    // sombra: negro puro dentro del horizonte
-    "  float shadow = 1.0 - smoothstep(Rh*0.96, Rh*1.0, r);",
+    // ---- sombra: negro puro dentro del horizonte ----
+    "  float shadow = 1.0 - smoothstep(Rh*0.97, Rh*1.005, r);",
     "  col *= (1.0 - shadow);",
 
-    // desvanecido del campo lejano
-    "  col *= (1.0 - smoothstep(0.95, 2.5, r));",
-
-    // tono suave (tipo filmic) y clamp
-    "  col = 1.0 - exp(-col*1.45);",
+    // clamp (sin filmic -> negros bien negros)
     "  col = clamp(col, 0.0, 1.0);",
     "  gl_FragColor = vec4(col, 1.0);",
     "}"
