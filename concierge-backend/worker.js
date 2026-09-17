@@ -173,7 +173,7 @@ export default {
     (async () => {
       const reader = upstream.body.getReader();
       const dec = new TextDecoder();
-      let buf = "";
+      let buf = "", full = "";
       try {
         while (true) {
           const { value, done } = await reader.read();
@@ -189,7 +189,7 @@ export default {
             try {
               const j = JSON.parse(payload);
               const tok = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
-              if (tok) await writer.write(sse({ type: "token", text: tok }));
+              if (tok) { full += tok; await writer.write(sse({ type: "token", text: tok })); }
             } catch (_) {}
           }
         }
@@ -197,6 +197,20 @@ export default {
         // cliente desconectado o error de red -> abortamos el upstream
         try { await reader.cancel(); } catch (_) {}
       }
+      // Poblar el ledger lateral: extraer datos del prospecto de la conversación
+      try {
+        const turns = messages
+          .filter((m) => m.role !== "system")
+          .map((m) => (m.role === "user" ? "Usuario: " : "Asistente: ") + m.content);
+        if (full) turns.push("Asistente: " + full);
+        const fields = await extractLedger(turns.join("\n"), env);
+        if (fields) {
+          await writer.write(sse({ type: "ledger", fields }));
+          if (fields.name && (fields.email || fields.phone)) {
+            await writer.write(sse({ type: "closed", id: "OMEN-" + Date.now().toString(36).toUpperCase() }));
+          }
+        }
+      } catch (_) {}
       try { await writer.write(sse({ type: "done" })); } catch (_) {}
       try { await writer.close(); } catch (_) {}
     })();
@@ -223,4 +237,52 @@ function errorStream(sse, cors, msg) {
   return new Response(stream, {
     headers: { ...cors, "Content-Type": "text/event-stream; charset=utf-8" },
   });
+}
+
+// Extrae los datos del prospecto para el ledger lateral (segunda llamada, no-stream).
+const EXTRACT_PROMPT = `Extraes datos de un prospecto a partir del historial de una conversación con el concierge de OMEN. Devuelve ÚNICAMENTE un objeto JSON válido con exactamente estas claves:
+{"name":"","email":"","phone":"","sector":"","project":""}
+- name: nombre de la persona o de su empresa.
+- email: correo electrónico.
+- phone: teléfono o WhatsApp.
+- sector: a qué se dedica su negocio.
+- project: qué necesita o qué quiere resolver.
+Usa solo lo que aparezca EXPLÍCITAMENTE en el historial; si un dato no está, deja cadena vacía. No inventes nada. Responde solo el JSON, sin texto adicional.`;
+
+async function extractLedger(transcript, env) {
+  try {
+    const r = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: "Bearer " + env.GROQ_API_KEY,
+      },
+      body: JSON.stringify({
+        model: env.GROQ_EXTRACT_MODEL || "openai/gpt-oss-20b",
+        messages: [
+          { role: "system", content: EXTRACT_PROMPT },
+          { role: "user", content: String(transcript).slice(0, 6000) },
+        ],
+        temperature: 0,
+        max_tokens: 300,
+        response_format: { type: "json_object" },
+      }),
+    });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const txt = (j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content) || "";
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    const o = JSON.parse(m[0]);
+    const clean = (v) => (typeof v === "string" ? v.trim().slice(0, 120) : "");
+    return {
+      name: clean(o.name),
+      email: clean(o.email),
+      phone: clean(o.phone),
+      sector: clean(o.sector),
+      project: clean(o.project),
+    };
+  } catch (_) {
+    return null;
+  }
 }
